@@ -69,12 +69,12 @@ function logSchedule() {
 let redeemTimer = null;
 
 function startRedeemer() {
-    redeemSniperPositions().catch((err) => logger.error('Sniper redeemer error:', err.message));
+    // Only run on interval, NOT on startup (we only want to redeem NEW winning positions)
     redeemTimer = setInterval(
         () => redeemSniperPositions().catch((err) => logger.error('Sniper redeemer error:', err.message)),
         config.redeemInterval,
     );
-    logger.info(`Sniper redeemer started — checking every ${config.redeemInterval / 1000}s`);
+    logger.info(`Sniper redeemer started — checking every ${config.redeemInterval / 1000}s (winners only, no startup check)`);
 }
 
 // ── Market handler ────────────────────────────────────────────────────────────

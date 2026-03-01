@@ -150,17 +150,28 @@ async function _doExecSafeCall(to, data, description = '') {
             const signature = ethers.utils.joinSignature(rawSig);
 
             // Polygon requires maxPriorityFeePerGas ≥ 25 Gwei.
-            // Some RPC nodes (e.g. lava.build) return a stale low estimate, so we enforce a floor.
+            // Use HIGH gas prices for fast inclusion — especially important for redeem.
             const feeData = await provider.getFeeData();
 
             // Increase gas price on retry to replace pending transaction
-            // Multiplier: 1x → 2x → 4x on subsequent attempts
-            const MIN_TIP = ethers.utils.parseUnits('30', 'gwei').mul(Math.ceil(gasMultiplier));
-            const gasTip = feeData.maxPriorityFeePerGas?.mul(Math.ceil(gasMultiplier)).gt(MIN_TIP)
-                ? feeData.maxPriorityFeePerGas.mul(Math.ceil(gasMultiplier))
+            // Base: use 150% of estimated fees for fast inclusion
+            // Multiplier on retry: 1.5x → 3x → 6x
+            const BASE_MULTIPLIER = 1.5;
+            const currentMultiplier = BASE_MULTIPLIER * gasMultiplier;
+
+            // Priority fee: minimum 50 Gwei, or 150%+ of estimate
+            const MIN_TIP = ethers.utils.parseUnits('50', 'gwei');
+            const estimatedTip = feeData.maxPriorityFeePerGas || MIN_TIP;
+            const gasTip = estimatedTip.mul(Math.ceil(currentMultiplier * 100)).div(100).gt(MIN_TIP)
+                ? estimatedTip.mul(Math.ceil(currentMultiplier * 100)).div(100)
                 : MIN_TIP;
-            const gasFeeCap = (feeData.maxFeePerGas ?? ethers.utils.parseUnits('500', 'gwei'))
-                .mul(Math.ceil(gasMultiplier * 1.5));
+
+            // Max fee: use high ceiling to ensure inclusion
+            const MAX_FEE_CAP = ethers.utils.parseUnits('1000', 'gwei');
+            const estimatedMaxFee = feeData.maxFeePerGas || ethers.utils.parseUnits('500', 'gwei');
+            const gasFeeCap = estimatedMaxFee.mul(Math.ceil(currentMultiplier * 100)).div(100).gt(MAX_FEE_CAP)
+                ? MAX_FEE_CAP
+                : estimatedMaxFee.mul(Math.ceil(currentMultiplier * 100)).div(100);
 
             const tx = await safe.execTransaction(
                 to, 0, data, 0, 0, 0, 0,
@@ -532,11 +543,8 @@ const _failedConditions = new Set();
 
 /**
  * Redeem sniper positions via Gnosis Safe.
- * Works exactly like the MM redeemer (redeemMMPositions):
- *   - Redeems ALL resolved positions (both winners and losers)
- *   - Burning loser tokens cleans them from the Data API, keeping cycles fast
- *   - Logs winners separately for profit tracking
- *   - Skips conditionIds that previously reverted on-chain
+ * Only redeems WINNING positions — skip losses (they can be manually cleared).
+ * Runs on interval only (no startup check) to catch new winners.
  */
 export async function redeemSniperPositions() {
     // 1. Query Data API for all positions held by the proxy wallet
@@ -608,31 +616,33 @@ export async function redeemSniperPositions() {
             const label = conditionId.slice(0, 12) + '...';
             const isWin = expectedUsdc >= 0.01;
 
-            if (config.dryRun) {
-                if (isWin) {
-                    logger.money(`SNIPER[SIM] redeem: ${label} — ${totalShares.toFixed(3)} shares → ~$${expectedUsdc.toFixed(2)} USDC (WIN)`);
+            // SNIPER: only redeem WINNERS — skip losses (manual cleanup)
+            if (!isWin) {
+                if (config.dryRun) {
+                    logger.info(`SNIPER[SIM] skip loss: ${label} — ${totalShares.toFixed(3)} shares (manual cleanup only)`);
                 } else {
-                    logger.info(`SNIPER[SIM] redeem: ${label} — ${totalShares.toFixed(3)} shares → $0 (loss, burning tokens)`);
+                    logger.info(`SNIPER redeemer: skip loss ${label} — not redeeming (manual cleanup)`);
                 }
                 continue;
             }
 
-            logger.info(`SNIPER redeemer: ${label} resolved — ${totalShares.toFixed(3)} shares → ~$${expectedUsdc.toFixed(2)} USDC${isWin ? '' : ' (loss)'}`);
+            if (config.dryRun) {
+                logger.money(`SNIPER[SIM] redeem: ${label} — ${totalShares.toFixed(3)} shares → ~$${expectedUsdc.toFixed(2)} USDC (WIN)`);
+                continue;
+            }
 
-            // Call redeemPositions through Safe — exactly like MM redeemer
+            logger.info(`SNIPER redeemer: ${label} resolved WIN — ${totalShares.toFixed(3)} shares → ~$${expectedUsdc.toFixed(2)} USDC`);
+
+            // Call redeemPositions through Safe — winners only
             const data = ctfIface.encodeFunctionData('redeemPositions', [
                 USDC_ADDRESS,
                 ethers.constants.HashZero,
                 conditionId,
                 [1, 2],
             ]);
-            await execSafeCall(CTF_ADDRESS, data, `redeemPositions ${label}`);
+            const receipt = await execSafeCall(CTF_ADDRESS, data, `redeemPositions ${label}`);
 
-            if (isWin) {
-                logger.money(`SNIPER redeemer: redeemed ${label} → ~$${expectedUsdc.toFixed(2)} USDC ✅`);
-            } else {
-                logger.info(`SNIPER redeemer: burned ${label} tokens (loss cleared)`);
-            }
+            logger.money(`SNIPER redeemer: redeemed ${label} → ~$${expectedUsdc.toFixed(2)} USDC ✅ | tx: ${receipt.transactionHash}`);
             redeemed++;
         } catch (err) {
             const friendly = parseOnchainError(err);
