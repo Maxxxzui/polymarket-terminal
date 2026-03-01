@@ -9,9 +9,6 @@
  * For the TUI dashboard version, use: npm run sniper-tui
  */
 
-// Load proxy patch BEFORE any other imports (must patch https before axios is loaded)
-import './utils/proxy-patch.cjs';
-
 import { validateMMConfig } from './config/index.js';
 import config from './config/index.js';
 import logger from './utils/logger.js';
@@ -20,6 +17,9 @@ import { startSniperDetector, stopSniperDetector } from './services/sniperDetect
 import { executeSnipe } from './services/sniperExecutor.js';
 import { redeemSniperPositions } from './services/ctf.js';
 import { getSchedule, isAssetInSession, getNextSessionInfo } from './services/schedule.js';
+
+// Set proxy before any network calls
+import './utils/proxy-patch.cjs';
 
 // ── Validate config ────────────────────────────────────────────────────────────
 
