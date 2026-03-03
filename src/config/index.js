@@ -75,12 +75,18 @@ const config = {
   mmRecoverySize: parseFloat(process.env.MM_RECOVERY_SIZE || '0'),    // 0 = use mmTradeSize
 
   // ── Orderbook Sniper ───────────────────────────────────────────
-  // Places tiny GTC limit BUY orders at a very low price on each side
-  // of ETH/SOL/XRP 5-minute markets — catches panic dumps near $0.
+  // 3-tier strategy: places GTC limit BUY orders at 3c, 2c, and 1c
+  // Tier 1 (3c): smallest size | Tier 2 (2c): medium size | Tier 3 (1c): largest size
+  // Min 5 shares per tier, total = SNIPER_MAX_SHARES_PER_SIDE
   sniperAssets: (process.env.SNIPER_ASSETS || 'eth,sol,xrp')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
-  sniperPrice: parseFloat(process.env.SNIPER_PRICE || '0.01'), // $ per share
-  sniperShares: parseFloat(process.env.SNIPER_SHARES || '5'),    // shares per side
+  sniperTierPrices: [
+    parseFloat(process.env.SNIPER_TIER1_PRICE || '0.03'), // high price, small size
+    parseFloat(process.env.SNIPER_TIER2_PRICE || '0.02'), // mid price, medium size
+    parseFloat(process.env.SNIPER_TIER3_PRICE || '0.01'), // low price, large size
+  ],
+  sniperMaxShares: parseFloat(process.env.SNIPER_MAX_SHARES || '15'), // max total per side
+  sniperMinSharesPerTier: 5, // minimum shares for each tier
 
   // ── Sniper Schedule (UTC+8) ────────────────────────────────────
   // Per-asset session windows. Format: SNIPER_SCHEDULE_{ASSET}=HH:MM-HH:MM,HH:MM-HH:MM

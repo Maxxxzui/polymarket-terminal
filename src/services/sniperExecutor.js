@@ -1,17 +1,10 @@
 /**
  * sniperExecutor.js
- * Places GTC limit BUY orders at a very low price on both sides of a market.
- *
- * Strategy:
- *   - For each market detected by sniperDetector, place two GTC BUY orders:
- *       UP   token at $SNIPER_PRICE × SNIPER_SHARES shares
- *       DOWN token at $SNIPER_PRICE × SNIPER_SHARES shares
- *   - Orders sit in the orderbook. If someone panic-dumps below the price,
- *     the order fills and becomes redeemable if that side wins.
- *   - GTC orders expire automatically when the market closes — no cleanup needed.
- *
- * Cost per market: SNIPER_PRICE × SNIPER_SHARES × 2 sides
- * e.g. $0.01 × 5 × 2 = $0.10 per market, $0.30 for 3 assets per 5-min slot
+ * 3-Tier Sniper Strategy:
+ *   - Tier 1: 3c price, smallest size (20% of max)
+ *   - Tier 2: 2c price, medium size (30% of max)
+ *   - Tier 3: 1c price, largest size (50% of max)
+ *   Min 5 shares per tier, total = SNIPER_MAX_SHARES
  */
 
 import { Side, OrderType } from '@polymarket/clob-client';
@@ -19,11 +12,35 @@ import config from '../config/index.js';
 import { getClient } from './client.js';
 import logger from '../utils/logger.js';
 
-// In-memory tracking of placed snipe orders (for TUI status panel)
-const activeSnipes = []; // { asset, side, question, orderId, price, shares, cost, potentialPayout }
+// In-memory tracking of placed snipe orders
+const activeSnipes = [];
 
 export function getActiveSnipes() {
     return [...activeSnipes];
+}
+
+/**
+ * Calculate tier sizes based on max shares.
+ * Distribution: 20% | 30% | 50% (high→low price)
+ * Minimum 5 shares per tier.
+ */
+function calculateTierSizes(maxShares, minPerTier) {
+    // Distribution percentages
+    const ratios = [0.20, 0.30, 0.50]; // Tier 1, 2, 3
+
+    const sizes = ratios.map(ratio => {
+        const size = Math.floor(maxShares * ratio);
+        return Math.max(size, minPerTier);
+    });
+
+    // Ensure we don't exceed maxShares after rounding up to minimums
+    const total = sizes.reduce((a, b) => a + b, 0);
+    if (total > maxShares) {
+        // Adjust tier 3 (largest) down if needed
+        sizes[2] = Math.max(minPerTier, sizes[2] - (total - maxShares));
+    }
+
+    return sizes;
 }
 
 export async function executeSnipe(market) {
@@ -36,56 +53,67 @@ export async function executeSnipe(market) {
         { name: 'DOWN', tokenId: noTokenId  },
     ];
 
-    logger.info(`SNIPER: ${sim}${asset.toUpperCase()} — "${label}" | $${config.sniperPrice} × ${config.sniperShares}sh each side`);
+    const prices = config.sniperTierPrices;
+    const sizes = calculateTierSizes(config.sniperMaxShares, config.sniperMinSharesPerTier);
+
+    logger.info(`SNIPER: ${sim}${asset.toUpperCase()} — "${label}" | 3-tier: 3c×${sizes[0]} | 2c×${sizes[1]} | 1c×${sizes[2]}`);
 
     for (const { name, tokenId } of sides) {
-        if (config.dryRun) {
-            const cost = config.sniperPrice * config.sniperShares;
-            logger.trade(`SNIPER[SIM]: ${asset.toUpperCase()} ${name} @ $${config.sniperPrice} × ${config.sniperShares}sh | cost $${cost.toFixed(3)} | payout $${config.sniperShares} if wins`);
-            activeSnipes.push({
-                asset: asset.toUpperCase(),
-                side: name,
-                question: label,
-                orderId: `sim-${Date.now()}-${tokenId.slice(-6)}`,
-                price: config.sniperPrice,
-                shares: config.sniperShares,
-                cost,
-                potentialPayout: config.sniperShares,
-            });
-            continue;
-        }
+        // Place 3 orders per side
+        for (let tier = 0; tier < 3; tier++) {
+            const price = prices[tier];
+            const size = sizes[tier];
 
-        const client = getClient();
-        try {
-            const res = await client.createAndPostOrder(
-                {
-                    tokenID: tokenId,
-                    side:    Side.BUY,
-                    price:   config.sniperPrice,
-                    size:    config.sniperShares,
-                },
-                { tickSize, negRisk },
-                OrderType.GTC,
-            );
-
-            if (res?.success) {
-                const cost = config.sniperPrice * config.sniperShares;
-                logger.trade(`SNIPER: ${asset.toUpperCase()} ${name} @ $${config.sniperPrice} × ${config.sniperShares}sh | cost $${cost.toFixed(3)} | order ${res.orderID}`);
+            if (config.dryRun) {
+                const cost = price * size;
+                logger.trade(`SNIPER[SIM]: ${asset.toUpperCase()} ${name} T${tier+1} @ $${price.toFixed(2)} × ${size}sh | cost $${cost.toFixed(3)}`);
                 activeSnipes.push({
                     asset: asset.toUpperCase(),
                     side: name,
+                    tier: tier + 1,
                     question: label,
-                    orderId: res.orderID,
-                    price: config.sniperPrice,
-                    shares: config.sniperShares,
+                    orderId: `sim-${Date.now()}-${tier}-${tokenId.slice(-6)}`,
+                    price,
+                    shares: size,
                     cost,
-                    potentialPayout: config.sniperShares,
+                    potentialPayout: size,
                 });
-            } else {
-                logger.warn(`SNIPER: ${asset.toUpperCase()} ${name} order failed — ${res?.errorMsg || 'unknown'}`);
+                continue;
             }
-        } catch (err) {
-            logger.error(`SNIPER: ${asset.toUpperCase()} ${name} error — ${err.message}`);
+
+            const client = getClient();
+            try {
+                const res = await client.createAndPostOrder(
+                    {
+                        tokenID: tokenId,
+                        side:    Side.BUY,
+                        price:   price,
+                        size:    size,
+                    },
+                    { tickSize, negRisk },
+                    OrderType.GTC,
+                );
+
+                if (res?.success) {
+                    const cost = price * size;
+                    logger.trade(`SNIPER: ${asset.toUpperCase()} ${name} T${tier+1} @ $${price.toFixed(2)} × ${size}sh | cost $${cost.toFixed(3)} | order ${res.orderID}`);
+                    activeSnipes.push({
+                        asset: asset.toUpperCase(),
+                        side: name,
+                        tier: tier + 1,
+                        question: label,
+                        orderId: res.orderID,
+                        price,
+                        shares: size,
+                        cost,
+                        potentialPayout: size,
+                    });
+                } else {
+                    logger.warn(`SNIPER: ${asset.toUpperCase()} ${name} T${tier+1} failed — ${res?.errorMsg || 'unknown'}`);
+                }
+            } catch (err) {
+                logger.error(`SNIPER: ${asset.toUpperCase()} ${name} T${tier+1} error — ${err.message}`);
+            }
         }
     }
 }

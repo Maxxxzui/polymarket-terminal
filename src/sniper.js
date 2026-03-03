@@ -102,9 +102,13 @@ process.on('SIGTERM', shutdown);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-const costPerSlot = (config.sniperPrice * config.sniperShares * 2 * config.sniperAssets.length).toFixed(3);
+// Calculate cost for 3-tier strategy
+const prices = config.sniperTierPrices;
+const sizes = [Math.floor(config.sniperMaxShares * 0.20), Math.floor(config.sniperMaxShares * 0.30), Math.floor(config.sniperMaxShares * 0.50)];
+const costPerSide = (sizes[0] * prices[0]) + (sizes[1] * prices[1]) + (sizes[2] * prices[2]);
+const costPerSlot = (costPerSide * 2 * config.sniperAssets.length).toFixed(3);
 logger.info(`SNIPER starting — ${config.dryRun ? 'SIMULATION' : 'LIVE'}`);
-logger.info(`Assets: ${config.sniperAssets.join(', ').toUpperCase()} | $${config.sniperPrice} × ${config.sniperShares}sh = $${costPerSlot}/slot`);
+logger.info(`Assets: ${config.sniperAssets.join(', ').toUpperCase()} | 3-tier: 3c×${sizes[0]}+2c×${sizes[1]}+1c×${sizes[2]} = $${costPerSlot}/slot`);
 
 logSchedule();
 startRedeemer();

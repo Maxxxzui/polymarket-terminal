@@ -42,9 +42,10 @@
 - **Simulation Mode** — Full dry-run with P&L tracking
 
 ### Orderbook Sniper Bot
-- **Low-Price Orders** — Places tiny GTC BUY orders at a configurable price (e.g. $0.01) on both sides
+- **3-Tier Strategy** — Places GTC BUY orders at 3c, 2c, and 1c with weighted sizing (20%/30%/50%)
 - **Multi-Asset** — Targets ETH, SOL, XRP, and more simultaneously
 - **Simulation Mode** — Preview orders without spending funds
+- **Session Scheduling** — Per-asset time windows (UTC+8) for selective trading
 
 ---
 
@@ -139,11 +140,26 @@ Leave these blank to have the client auto-derive credentials from your private k
 
 ### Orderbook Sniper Settings
 
+**3-Tier Strategy:** Places orders at 3 price levels with weighted sizing
+
 | Variable | Description | Default |
 |---|---|---|
 | `SNIPER_ASSETS` | Comma-separated assets to snipe (e.g. `eth,sol,xrp`) | `eth,sol,xrp` |
-| `SNIPER_PRICE` | Buy price per share (e.g. `0.01` = $0.01) | `0.01` |
-| `SNIPER_SHARES` | Shares per side (minimum 5 per Polymarket rules) | `5` |
+| `SNIPER_TIER1_PRICE` | Highest price tier (e.g. `0.03` = 3c) | `0.03` |
+| `SNIPER_TIER2_PRICE` | Mid price tier (e.g. `0.02` = 2c) | `0.02` |
+| `SNIPER_TIER3_PRICE` | Lowest price tier (e.g. `0.01` = 1c) | `0.01` |
+| `SNIPER_MAX_SHARES` | Max total shares per side (min 5 per tier) | `15` |
+
+**Allocation:**
+- Tier 1 (3c): 20% of max shares (min 5)
+- Tier 2 (2c): 30% of max shares (min 5)
+- Tier 3 (1c): 50% of max shares (min 5)
+
+**Example with `SNIPER_MAX_SHARES=15`:**
+- 3 shares @ 3c = $0.09
+- 5 shares @ 2c = $0.10
+- 7 shares @ 1c = $0.07
+- **Total per side:** 15 shares = $0.26
 
 ---
 
