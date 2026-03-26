@@ -237,8 +237,13 @@ async function monitorAndManage(pos) {
             const marketStartMs = new Date(pos.endTime).getTime() - marketDurationMs;
             const elapsed = (Date.now() - marketStartMs) / 1000;
             if (elapsed >= config.mmDefensiveTimeout) {
+                // Cancel both orders FIRST so they can't fill while we wait
+                logger.warn(`MM: neither side filled after ${Math.round(elapsed)}s since market open — cancelling orders & entering defensive mode | ${label}`);
+                await cancelOrder(pos.yes.orderId);
+                await cancelOrder(pos.no.orderId);
+                pos.yes.orderId = null;
+                pos.no.orderId = null;
                 pos._defensiveActive = true;
-                logger.warn(`MM: neither side filled after ${Math.round(elapsed)}s since market open — entering defensive mode | ${label}`);
                 await defensivePivot(pos);
                 break;
             }
@@ -342,7 +347,7 @@ async function cutLossNeitherFilled(pos) {
  * Defensive pivot: neither side has filled after MM_DEFENSIVE_TIMEOUT.
  *
  * Strategy:
- *   1. Cancel both limit sells, keep monitoring
+ *   1. Orders already cancelled by caller (monitorAndManage)
  *   2. Wait until 45s before close
  *   3. Check prices: identify worst (lower price) and best (higher price) side
  *   4. If worst < MM_DEFENSIVE_WORST_THRESHOLD (default 10c):
@@ -355,12 +360,10 @@ async function defensivePivot(pos) {
     const label = pos.question.substring(0, 40);
     const threshold = config.mmDefensiveWorstThreshold;
 
-    // Cancel both limit sells immediately — we'll decide at 30s mark
-    await cancelOrder(pos.yes.orderId);
-    await cancelOrder(pos.no.orderId);
-    logger.info(`MM defensive: cancelled both limit sells — waiting for 45s before close | ${label}`);
+    // Orders already cancelled by monitorAndManage before entering here
+    logger.info(`MM defensive: waiting for 45s before close | ${label}`);
 
-    // Wait until 30s before close, checking every 5s if one side fills via partial
+    // Wait until 45s before close, checking every 5s
     while (true) {
         const msLeft = new Date(pos.endTime).getTime() - Date.now();
 
