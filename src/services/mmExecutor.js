@@ -450,8 +450,37 @@ async function adaptiveLegCL(pos, unfilledKey) {
     const filledLegPrice   = pos[filledKey].fillPrice ?? config.mmSellPrice;
     const minAdaptivePrice = Math.max(0, config.mmAdaptiveMinCombined - filledLegPrice);
 
+    // ── Tiered floors (5m markets): progressively lower floor over time ────
+    // breakevenFloor: filledLeg + unfilledLeg = $1.00 → zero net P&L
+    const breakevenFloor = Math.max(0, 1.00 - filledLegPrice);
+    const floorDrop      = config.mmDefensiveEnabled ? 0.10 : 0;
+    const emergencyPrice = config.mmDefensiveWorstThreshold; // default 0.10
+
+    const is5m = config.mmDuration === '5m';
+
+    /**
+     * Get the current floor based on time remaining (5m markets only).
+     * Other durations use the fixed mmAdaptiveMinCombined floor.
+     *
+     * Phase 1 (> 180s left): breakevenFloor         (e.g. 0.40 for 60c fill)
+     * Phase 2 (90–180s):     breakevenFloor - 0.10   (e.g. 0.30)
+     * Phase 3 (30–90s):      breakevenFloor - 0.20   (e.g. 0.20)
+     * Phase 4 (< 30s):       market sell
+     */
+    function getTieredFloor(msLeft) {
+        if (!is5m) return minAdaptivePrice; // non-5m: use fixed floor
+        if (msLeft > 180_000) return breakevenFloor;
+        if (msLeft > 90_000)  return Math.max(0.01, breakevenFloor - floorDrop);
+        if (msLeft > 30_000)  return Math.max(0.01, breakevenFloor - floorDrop * 2);
+        return 0; // phase 4: market sell
+    }
+
     logger.warn(`MM: one leg filled — starting adaptive CL for ${unfilledKey.toUpperCase()} | ${label}`);
-    logger.info(`MM adaptive CL: filled leg @ $${filledLegPrice.toFixed(3)} | min floor for combined ≥ $${config.mmAdaptiveMinCombined.toFixed(2)}: $${minAdaptivePrice.toFixed(3)}`);
+    if (is5m) {
+        logger.info(`MM adaptive CL: filled @ $${filledLegPrice.toFixed(3)} | breakeven floor: $${breakevenFloor.toFixed(3)} | tiered: $${breakevenFloor.toFixed(2)} → $${Math.max(0.01, breakevenFloor - floorDrop).toFixed(2)} → $${Math.max(0.01, breakevenFloor - floorDrop * 2).toFixed(2)}`);
+    } else {
+        logger.info(`MM adaptive CL: filled leg @ $${filledLegPrice.toFixed(3)} | min floor for combined ≥ $${config.mmAdaptiveMinCombined.toFixed(2)}: $${minAdaptivePrice.toFixed(3)}`);
+    }
 
     // Cancel the unfilled leg's old GTC order immediately
     await cancelOrder(s.orderId);
@@ -482,30 +511,56 @@ async function adaptiveLegCL(pos, unfilledKey) {
         return;
     }
 
-    logger.info(`MM adaptive CL: monitoring ${unfilledKey.toUpperCase()} — limit only when price ≥ $${minAdaptivePrice.toFixed(3)}, market-sell only at CL time`);
-
+    // Place standing order at breakeven floor immediately (5m) so brief bounces get caught
     let activeOrderId    = null;
     let activeLimitPrice = 0;
+    let currentFloor     = is5m ? breakevenFloor : minAdaptivePrice;
+
+    if (is5m && sellShares >= CLOB_MIN_ORDER_SHARES) {
+        logger.info(`MM adaptive CL: placing standing limit sell @ $${breakevenFloor.toFixed(3)} (breakeven floor)`);
+        const standing = await placeLimitSell(s.tokenId, sellShares, breakevenFloor, tickSize, negRisk);
+        if (standing.success) {
+            activeOrderId    = standing.orderId;
+            activeLimitPrice = breakevenFloor;
+        }
+    } else {
+        logger.info(`MM adaptive CL: monitoring ${unfilledKey.toUpperCase()} — floor $${currentFloor.toFixed(3)}, market-sell at CL time`);
+    }
 
     // ── Continuous monitoring loop ─────────────────────────────────────────────
-    // Every poll cycle:
-    //   1. CL time → cancel limit, market sell (last resort)
-    //   2. Check fill → done
-    //   3. Read current price
-    //   4a. Price < floor OR dropped >5% → cancel limit, keep watching
-    //   4b. Price improved >2% → cancel and re-place higher
-    //   5a. price >= floor → place/maintain limit at min(currentPrice, mmSellPrice)
-    //   5b. price < floor → no limit placed, log & wait (never sell below profit floor)
+    let lastPhaseLog = '';
+
     while (true) {
         const msLeft = new Date(pos.endTime).getTime() - Date.now();
 
-        // ── CL time: last resort market sell ───────────────────────────────
-        if (msLeft <= config.mmCutLossTime * 1000) {
+        // ── Phase 4 / CL time: force market sell ────────────────────────────
+        if (msLeft <= (is5m ? 30_000 : config.mmCutLossTime * 1000)) {
             if (activeOrderId) {
                 await cancelOrder(activeOrderId);
                 activeOrderId = null;
             }
             break;
+        }
+
+        // ── Update tiered floor ─────────────────────────────────────────────
+        const newFloor = getTieredFloor(msLeft);
+        if (newFloor !== currentFloor) {
+            const phase = msLeft > 180_000 ? '1-breakeven' : msLeft > 90_000 ? '2-controlled' : '3-emergency';
+            if (phase !== lastPhaseLog) {
+                logger.info(`MM adaptive CL: phase ${phase} — floor $${currentFloor.toFixed(3)} → $${newFloor.toFixed(3)} (${Math.round(msLeft / 1000)}s left)`);
+                lastPhaseLog = phase;
+            }
+            // If floor lowered and we have an active order above new floor, keep it
+            // Only cancel+re-place if the floor dropped below our current limit
+            if (activeOrderId && activeLimitPrice > newFloor) {
+                // Current limit is above new floor — that's fine, keep it
+            } else if (activeOrderId && activeLimitPrice < newFloor) {
+                // Floor raised (shouldn't happen in tiered, but safety)
+                await cancelOrder(activeOrderId);
+                activeOrderId    = null;
+                activeLimitPrice = 0;
+            }
+            currentFloor = newFloor;
         }
 
         // ── Check fill ──────────────────────────────────────────────────────
@@ -536,17 +591,27 @@ async function adaptiveLegCL(pos, unfilledKey) {
             continue;
         }
 
+        // ── Emergency cut: price < 10c in phase 3 → market sell immediately ─
+        if (is5m && msLeft <= 90_000 && currentPrice < emergencyPrice) {
+            logger.warn(`MM adaptive CL: EMERGENCY — price $${currentPrice.toFixed(3)} < $${emergencyPrice} with ${Math.round(msLeft / 1000)}s left — market selling now`);
+            if (activeOrderId) {
+                await cancelOrder(activeOrderId);
+                activeOrderId = null;
+            }
+            break; // fall through to market sell below
+        }
+
         const targetPrice = Math.min(currentPrice, config.mmSellPrice);
 
         // ── Adjust or cancel active limit ───────────────────────────────────
         if (activeOrderId) {
-            const belowFloor    = currentPrice < minAdaptivePrice;
+            const belowFloor    = currentPrice < currentFloor;
             const droppedHard   = currentPrice < activeLimitPrice * 0.95;
             const priceImproved = targetPrice > activeLimitPrice * 1.02;
 
             if (belowFloor || droppedHard) {
                 const reason = belowFloor
-                    ? `below floor $${minAdaptivePrice.toFixed(3)} (combined $${(filledLegPrice + currentPrice).toFixed(3)} < $${config.mmAdaptiveMinCombined.toFixed(2)})`
+                    ? `below floor $${currentFloor.toFixed(3)}`
                     : `dropped >5% from limit $${activeLimitPrice.toFixed(3)}`;
                 logger.info(`MM adaptive CL: price $${currentPrice.toFixed(3)} ${reason} — cancelling limit, watching for recovery`);
                 await cancelOrder(activeOrderId);
@@ -561,7 +626,7 @@ async function adaptiveLegCL(pos, unfilledKey) {
             }
         }
 
-        // ── Place limit only above the profitable floor ─────────────────────
+        // ── Place limit at floor or above ───────────────────────────────────
         if (!activeOrderId) {
             // Re-check actual balance — partial fills may have reduced it
             const currentBalance = await getTokenBalance(s.tokenId);
@@ -587,15 +652,21 @@ async function adaptiveLegCL(pos, unfilledKey) {
                 return;
             }
 
-            if (currentPrice >= minAdaptivePrice) {
-                logger.info(`MM adaptive CL: placing limit sell @ $${targetPrice.toFixed(3)} (mid: $${currentPrice.toFixed(3)}, combined: $${(filledLegPrice + targetPrice).toFixed(3)}, ${Math.round(msLeft / 1000)}s left)`);
-                const result = await placeLimitSell(s.tokenId, remainingShares, targetPrice, tickSize, negRisk);
+            // Place at max(currentPrice, floor) — standing order strategy
+            const sellPrice = Math.max(currentPrice, currentFloor);
+            const limitPrice = Math.min(sellPrice, config.mmSellPrice);
+
+            if (currentPrice >= currentFloor || is5m) {
+                // 5m: always place at floor or above (standing order catches bounces)
+                // non-5m: only place when price >= floor
+                logger.info(`MM adaptive CL: placing limit sell @ $${limitPrice.toFixed(3)} (mid: $${currentPrice.toFixed(3)}, floor: $${currentFloor.toFixed(3)}, ${Math.round(msLeft / 1000)}s left)`);
+                const result = await placeLimitSell(s.tokenId, remainingShares, limitPrice, tickSize, negRisk);
                 if (result.success) {
                     activeOrderId    = result.orderId;
-                    activeLimitPrice = targetPrice;
+                    activeLimitPrice = limitPrice;
                 }
             } else {
-                logger.info(`MM adaptive CL: price $${currentPrice.toFixed(3)} below floor $${minAdaptivePrice.toFixed(3)} (combined $${(filledLegPrice + currentPrice).toFixed(3)}) — waiting for recovery (${Math.round(msLeft / 1000)}s left)`);
+                logger.info(`MM adaptive CL: price $${currentPrice.toFixed(3)} below floor $${currentFloor.toFixed(3)} — waiting for recovery (${Math.round(msLeft / 1000)}s left)`);
             }
         }
 
@@ -615,7 +686,8 @@ async function adaptiveLegCL(pos, unfilledKey) {
         return;
     }
 
-    logger.warn(`MM adaptive CL: CL time reached — market-selling ${finalShares.toFixed(3)} ${unfilledKey.toUpperCase()} shares`);
+    const exitReason = is5m ? 'phase 4 force exit (<30s)' : 'CL time reached';
+    logger.warn(`MM adaptive CL: ${exitReason} — market-selling ${finalShares.toFixed(3)} ${unfilledKey.toUpperCase()} shares`);
     const result   = await marketSell(s.tokenId, finalShares, tickSize, negRisk);
     s.fillPrice    = result.fillPrice;
     const pnl      = (s.fillPrice - s.entryPrice) * finalShares;
