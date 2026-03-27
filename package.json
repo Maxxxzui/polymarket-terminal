@@ -21,7 +21,8 @@
     "sniper-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper.js",
     "sniper-tui": "DRY_RUN=false node src/sniper-tui.js",
     "sniper-tui-sim": "DRY_RUN=true node src/sniper-tui.js",
-    "sniper-tui-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper-tui.js"
+    "sniper-tui-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper-tui.js",
+    "postinstall": "node scripts/patch-clob-client.cjs"
   },
   "keywords": [
     "polymarket",
