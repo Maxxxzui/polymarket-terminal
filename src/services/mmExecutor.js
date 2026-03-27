@@ -531,7 +531,7 @@ async function adaptiveLegCL(pos, unfilledKey) {
     // Place standing order at breakeven floor immediately (5m) so brief bounces get caught
     let activeOrderId    = null;
     let activeLimitPrice = 0;
-    let currentFloor     = is5m ? breakevenFloor : minAdaptivePrice;
+    let currentFloor     = minAdaptivePrice;
 
     if (is5m && sellShares >= CLOB_MIN_ORDER_SHARES) {
         // Check mid price first — place at market price (not just breakeven floor)
