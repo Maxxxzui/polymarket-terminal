@@ -241,7 +241,11 @@ async function placeLimitBuy(tokenId, shares, price, tickSize, negRisk) {
             OrderType.GTC,
         );
         if (!res?.success) {
-            logger.error(`MakerMM: limit buy failed — response: ${JSON.stringify(res)}`);
+            // JSON.stringify can throw "Maximum call stack size exceeded" if res
+            // contains a circular reference (e.g. axios/fetch response object).
+            // Log only safe primitive fields instead.
+            const errDetail = res?.errorMsg || res?.error || res?.message || 'unknown';
+            logger.error(`MakerMM: limit buy failed — response: {"error":"${errDetail}","status":${res?.status ?? 'n/a'}}`);
             return { success: false };
         }
         return { success: true, orderId: res.orderID };
