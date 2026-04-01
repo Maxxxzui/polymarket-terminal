@@ -626,30 +626,38 @@ export async function executeMakerRebateStrategy(market) {
             continue;
         }
 
-        // Target = bestBid + 1 tick; safety cap below ask
-        yesBid = roundToTick(yesBestBid + ts, tickSize);
-        if (yesAsk && yesBid >= yesAsk) yesBid = roundToTick(yesAsk - ts, tickSize);
+        // Auto-detect cheap side: whichever of YES/NO has lower bestBid.
+        // Range filter (MIN_PRICE/MAX_PRICE) applies to the cheap side only.
+        // The expensive side is derived from: maxCombined - cheapBid.
+        const cheapSide = yesBestBid <= noBestBid ? 'yes' : 'no';
+        const cheapBestBid = cheapSide === 'yes' ? yesBestBid : noBestBid;
+        const cheapAsk    = cheapSide === 'yes' ? yesAsk    : noAsk;
 
-        // Range check on YES bid
-        if (yesBid < MIN_PRICE || yesBid > MAX_PRICE) {
-            logger.info(`MakerMM${tag}: waiting — YES bid $${yesBid.toFixed(3)} (need ${MIN_PRICE}-${MAX_PRICE})`);
+        let cheapBid = roundToTick(cheapBestBid + ts, tickSize);
+        if (cheapAsk && cheapBid >= cheapAsk) cheapBid = roundToTick(cheapAsk - ts, tickSize);
+
+        // Range check on cheap side
+        if (cheapBid < MIN_PRICE || cheapBid > MAX_PRICE) {
+            logger.info(`MakerMM${tag}: waiting — ${cheapSide.toUpperCase()} bid $${cheapBid.toFixed(3)} (need ${MIN_PRICE}-${MAX_PRICE})`);
             await sleep(POLL_SEC * 1000);
             continue;
         }
 
-        // NO bid: fill remaining combined budget
-        noBid = roundToTick(config.makerMmMaxCombined - yesBid, tickSize);
-        // Safety: ensure NO is also strictly below NO ask (maker)
-        if (noAsk && noBid >= noAsk) noBid = roundToTick(noAsk - ts, tickSize);
+        // Expensive side: fill remaining combined budget
+        const expensiveBid = roundToTick(config.makerMmMaxCombined - cheapBid, tickSize);
+        const expensiveAsk = cheapSide === 'yes' ? noAsk : yesAsk;
+        let expBid = expensiveBid;
+        if (expensiveAsk && expBid >= expensiveAsk) expBid = roundToTick(expensiveAsk - ts, tickSize);
 
-        // Sanity check on NO bid — only basic bounds, no range filter.
-        // MIN/MAX_PRICE applies to YES only (entry condition), not NO.
-        // e.g. YES=11c + NO=87c is valid even though NO > MAX_PRICE.
-        if (noBid <= 0 || noBid >= 1) {
-            logger.info(`MakerMM${tag}: waiting — NO bid $${noBid.toFixed(3)} out of bounds`);
+        if (expBid <= 0 || expBid >= 1) {
+            logger.info(`MakerMM${tag}: waiting — ${cheapSide === 'yes' ? 'NO' : 'YES'} bid $${expBid.toFixed(3)} out of bounds`);
             await sleep(POLL_SEC * 1000);
             continue;
         }
+
+        // Map back to yes/no
+        yesBid = cheapSide === 'yes' ? cheapBid : expBid;
+        noBid  = cheapSide === 'yes' ? expBid   : cheapBid;
 
         combined = parseFloat((yesBid + noBid).toFixed(4));
 
