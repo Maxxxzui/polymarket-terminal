@@ -692,19 +692,8 @@ export async function executeMakerRebateStrategy(market) {
         return;
     }
 
-    // Auto-scale shares to meet Polymarket's $1 minimum notional per side.
-    // When cheap side price is very low (e.g. 5c), 5 shares × $0.05 = $0.25 < $1 minimum.
-    // Both sides scale to the same count to keep YES+NO pairs balanced for merge.
-    const MIN_NOTIONAL = 1.0;
-    const yesMinShares = Math.ceil(MIN_NOTIONAL / yesBid);
-    const noMinShares  = Math.ceil(MIN_NOTIONAL / noBid);
-    const actualShares = Math.max(targetShares, yesMinShares, noMinShares);
-    if (actualShares > targetShares) {
-        logger.info(`MakerMM${tag}: auto-scaled shares ${targetShares} → ${actualShares} to meet $${MIN_NOTIONAL} notional (YES $${yesBid} × ${yesMinShares}, NO $${noBid} × ${noMinShares})`);
-    }
-
-    const yesCost = actualShares * yesBid;
-    const noCost  = actualShares * noBid;
+    const yesCost = targetShares * yesBid;
+    const noCost  = targetShares * noBid;
     const totalCost = yesCost + noCost;
 
     if (!config.dryRun) {
@@ -729,11 +718,11 @@ export async function executeMakerRebateStrategy(market) {
     }
 
     // ── Place orders ONCE (NO repricing) ──────────────────────
-    logger.trade(`MakerMM${tag}: placing BUY — YES $${yesBid} × ${actualShares} + NO $${noBid} × ${actualShares} = $${totalCost.toFixed(2)}`);
+    logger.trade(`MakerMM${tag}: placing BUY — YES $${yesBid} × ${targetShares} + NO $${noBid} × ${targetShares} = $${totalCost.toFixed(2)}`);
 
     const [yesBuy, noBuy] = await Promise.all([
-        placeLimitBuy(yesTokenId, actualShares, yesBid, tickSize, negRisk),
-        placeLimitBuy(noTokenId, actualShares, noBid, tickSize, negRisk),
+        placeLimitBuy(yesTokenId, targetShares, yesBid, tickSize, negRisk),
+        placeLimitBuy(noTokenId, targetShares, noBid, tickSize, negRisk),
     ]);
 
     logger.info(`MakerMM${tag}: order results — YES: ${yesBuy.success ? 'OK' : 'FAIL'} (id=${yesBuy.orderId?.slice(-8) || 'none'}), NO: ${noBuy.success ? 'OK' : 'FAIL'} (id=${noBuy.orderId?.slice(-8) || 'none'})`);
@@ -764,7 +753,7 @@ export async function executeMakerRebateStrategy(market) {
 
         // Use net (new) balance to determine if actually filled — not total balance
         if (!finalYesBuy.success && (
-            yesNet >= actualShares * 0.5 ||
+            yesNet >= targetShares * 0.5 ||
             yesOrderStatus === 'filled' ||
             yesOrderStatus === 'partial'
         )) {
@@ -773,7 +762,7 @@ export async function executeMakerRebateStrategy(market) {
         }
 
         if (!finalNoBuy.success && (
-            noNet >= actualShares * 0.5 ||
+            noNet >= targetShares * 0.5 ||
             noOrderStatus === 'filled' ||
             noOrderStatus === 'partial'
         )) {
@@ -788,7 +777,7 @@ export async function executeMakerRebateStrategy(market) {
             logger.warn(`MakerMM${tag}: retrying YES order (attempt ${attempt}/${maxRetries})...`);
             await cancelOrder(yesBuy.orderId);
             await sleep(500);
-            finalYesBuy = await placeLimitBuy(yesTokenId, actualShares, yesBid, tickSize, negRisk);
+            finalYesBuy = await placeLimitBuy(yesTokenId, targetShares, yesBid, tickSize, negRisk);
             if (finalYesBuy.success) {
                 logger.success(`MakerMM${tag}: YES order succeeded on retry ${attempt}`);
             }
@@ -797,7 +786,7 @@ export async function executeMakerRebateStrategy(market) {
             logger.warn(`MakerMM${tag}: retrying NO order (attempt ${attempt}/${maxRetries})...`);
             await cancelOrder(noBuy.orderId);
             await sleep(500);
-            finalNoBuy = await placeLimitBuy(noTokenId, actualShares, noBid, tickSize, negRisk);
+            finalNoBuy = await placeLimitBuy(noTokenId, targetShares, noBid, tickSize, negRisk);
             if (finalNoBuy.success) {
                 logger.success(`MakerMM${tag}: NO order succeeded on retry ${attempt}`);
             }
@@ -823,7 +812,7 @@ export async function executeMakerRebateStrategy(market) {
         tickSize,
         negRisk,
         status: 'monitoring',
-        targetShares: actualShares,
+        targetShares,
         yes: {
             tokenId: yesTokenId,
             buyPrice: yesBid,
