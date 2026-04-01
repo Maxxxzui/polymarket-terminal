@@ -634,7 +634,10 @@ export async function executeMakerRebateStrategy(market) {
         const cheapAsk    = cheapSide === 'yes' ? yesAsk    : noAsk;
 
         let cheapBid = roundToTick(cheapBestBid + ts, tickSize);
-        if (cheapAsk && cheapBid >= cheapAsk) cheapBid = roundToTick(cheapAsk - ts, tickSize);
+        // Cap to ask - 2 ticks (not 1) to absorb timing race between fetch and place.
+        // A 1-tick buffer still lets the ask move 1 tick before our order is submitted,
+        // turning it into a marketable (taker) order and hitting the $1 minimum.
+        if (cheapAsk && cheapBid >= cheapAsk - ts) cheapBid = roundToTick(cheapAsk - 2 * ts, tickSize);
 
         // Range check on cheap side
         if (cheapBid < MIN_PRICE || cheapBid > MAX_PRICE) {
@@ -647,7 +650,7 @@ export async function executeMakerRebateStrategy(market) {
         const expensiveBid = roundToTick(config.makerMmMaxCombined - cheapBid, tickSize);
         const expensiveAsk = cheapSide === 'yes' ? noAsk : yesAsk;
         let expBid = expensiveBid;
-        if (expensiveAsk && expBid >= expensiveAsk) expBid = roundToTick(expensiveAsk - ts, tickSize);
+        if (expensiveAsk && expBid >= expensiveAsk - ts) expBid = roundToTick(expensiveAsk - 2 * ts, tickSize);
 
         if (expBid <= 0 || expBid >= 1) {
             logger.info(`MakerMM${tag}: waiting — ${cheapSide === 'yes' ? 'NO' : 'YES'} bid $${expBid.toFixed(3)} out of bounds`);
