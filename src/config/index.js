@@ -102,6 +102,7 @@ const config = {
   makerMmMaxPrice: parseFloat(process.env.MAKER_MM_MAX_PRICE || '0.69'),   // max bid for rebate range (both sides)
   // When true: if expensive side fills first, cancel cheap side and hold to redemption
   makerMmCancelCheapOnExpFill: process.env.MAKER_MM_CANCEL_CHEAP_ON_EXP_FILL === 'true',
+  makerMmPollSec: parseInt(process.env.MAKER_MM_POLL_SEC || '3', 10),
 
   // ── Current Market Settings ────────────────────────────────────
   // Enable trading on current active market (not just next market)

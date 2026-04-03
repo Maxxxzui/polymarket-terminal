@@ -677,7 +677,7 @@ export async function executeMakerRebateStrategy(market) {
     logger.info(`MakerMM${tag}: ${sim}entering — ${label}`);
 
     // ── Wait for real YES price ─────────────────────────────────
-    const POLL_SEC = 3;
+    const POLL_SEC = config.makerMmPollSec;
     const ts = parseFloat(tickSize);
 
     let yesBid, noBid, combined;
