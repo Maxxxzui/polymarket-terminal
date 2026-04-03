@@ -218,11 +218,24 @@ async function recoverFromGhostFill(pos, yesShares, noShares, tag) {
     const yesRemainder = parseFloat(Math.max(0, yesShares - mergeable).toFixed(6));
     const noRemainder  = parseFloat(Math.max(0, noShares  - mergeable).toFixed(6));
 
+    // Only market-sell the CHEAP side remainder — expensive side is too costly to dump at market.
+    // e.g. YES=83c filled, NO=15c ghost → hold YES (high cost basis, market sell = guaranteed loss).
+    //      NO=15c filled, YES=83c ghost → sell NO (cheap, small loss acceptable).
+    const expSide = pos.yes.buyPrice >= pos.no.buyPrice ? 'yes' : 'no';
+
     if (yesRemainder >= 1) {
-        await marketSellToken(pos.yes.tokenId, yesRemainder, pos.tickSize, pos.negRisk, tag);
+        if (expSide === 'yes') {
+            logger.warn(`MakerMM${tag}: ghost recovery — holding YES remainder ${yesRemainder.toFixed(4)} (expensive $${pos.yes.buyPrice}, not market-selling)`);
+        } else {
+            await marketSellToken(pos.yes.tokenId, yesRemainder, pos.tickSize, pos.negRisk, tag);
+        }
     }
     if (noRemainder >= 1) {
-        await marketSellToken(pos.no.tokenId, noRemainder, pos.tickSize, pos.negRisk, tag);
+        if (expSide === 'no') {
+            logger.warn(`MakerMM${tag}: ghost recovery — holding NO remainder ${noRemainder.toFixed(4)} (expensive $${pos.no.buyPrice}, not market-selling)`);
+        } else {
+            await marketSellToken(pos.no.tokenId, noRemainder, pos.tickSize, pos.negRisk, tag);
+        }
     }
 
     pos.totalProfit = mergeRecovered - (pos.yes.cost + pos.no.cost);
