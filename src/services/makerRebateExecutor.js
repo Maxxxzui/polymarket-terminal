@@ -225,21 +225,24 @@ async function recoverFromGhostFill(pos, yesShares, noShares, tag) {
 
     if (yesRemainder >= 1) {
         if (expSide === 'yes') {
-            logger.warn(`MakerMM${tag}: ghost recovery — holding YES remainder ${yesRemainder.toFixed(4)} (expensive $${pos.yes.buyPrice}, not market-selling)`);
+            logger.warn(`MakerMM${tag}: ghost recovery — holding YES remainder ${yesRemainder.toFixed(4)} (expensive $${pos.yes.buyPrice}, scheduling redeem after resolution)`);
+            pos.holdingSide = 'yes';
         } else {
             await marketSellToken(pos.yes.tokenId, yesRemainder, pos.tickSize, pos.negRisk, tag);
         }
     }
     if (noRemainder >= 1) {
         if (expSide === 'no') {
-            logger.warn(`MakerMM${tag}: ghost recovery — holding NO remainder ${noRemainder.toFixed(4)} (expensive $${pos.no.buyPrice}, not market-selling)`);
+            logger.warn(`MakerMM${tag}: ghost recovery — holding NO remainder ${noRemainder.toFixed(4)} (expensive $${pos.no.buyPrice}, scheduling redeem after resolution)`);
+            pos.holdingSide = 'no';
         } else {
             await marketSellToken(pos.no.tokenId, noRemainder, pos.tickSize, pos.negRisk, tag);
         }
     }
 
     pos.totalProfit = mergeRecovered - (pos.yes.cost + pos.no.cost);
-    pos.status = 'done';
+    // Don't mark done if holding expensive side — waitAndRedeem will close it out
+    if (!pos.holdingSide) pos.status = 'done';
 }
 
 async function placeLimitBuy(tokenId, shares, price, tickSize, negRisk) {
