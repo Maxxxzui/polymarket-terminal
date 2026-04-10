@@ -16,8 +16,8 @@ import logger from './utils/logger.js';
 
 logger.interceptConsole(); // strip auth headers from CLOB axios error dumps
 
-// --- TAMBAHAN FUNGSI TELEGRAM INTERACTIVE ---
-let lastUpdateId = 0;
+// --- TAMBAHAN FUNGSI TELEGRAM INTERACTIVE (FIXED) ---
+let lastUpdateId = null; 
 let lastPosCount = -1;
 
 async function kirimNotifTelegram(pesan) {
@@ -42,27 +42,41 @@ async function dengarkanTelegram() {
     if (!token) return;
 
     try {
-        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=5`);
+        // Trik offset=-1 untuk membersihkan antrean chat lama saat bot baru nyala
+        const offsetParam = lastUpdateId !== null ? `?offset=${lastUpdateId + 1}` : `?offset=-1`;
+        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates${offsetParam}&timeout=5`);
         const data = await res.json();
         
         if (data.result && data.result.length > 0) {
             for (const update of data.result) {
+                const isFirstCheck = (lastUpdateId === null);
                 lastUpdateId = update.update_id;
+
+                // Jika ini cek pertama, abaikan pesan lama (biar gak mati sendiri)
+                if (isFirstCheck) {
+                    logger.info("🧹 Membersihkan antrean perintah lama dari Telegram...");
+                    continue;
+                }
+
                 const msg = update.message?.text;
+                if (!msg) continue;
                 
                 if (msg === '/status') {
                     logger.info("📩 Perintah Telegram: /status");
-                    await printStatus(true); // Paksa kirim notif
+                    await printStatus(true);
                 } 
                 else if (msg === '/stop') {
                     logger.info("📩 Perintah Telegram: /stop");
                     await kirimNotifTelegram("🛑 *Bot dihentikan via Telegram!*");
-                    process.emit('SIGINT');
+                    setTimeout(() => process.exit(0), 500);
                 }
                 else if (msg === '/start') {
                     await kirimNotifTelegram("🤖 *Bot Polymarket aktif!* \nKetik /status untuk cek saldo & posisi.");
                 }
             }
+        } else if (lastUpdateId === null) {
+            // Jika tidak ada update sama sekali saat start, set ID ke 0 agar loop berikutnya normal
+            lastUpdateId = 0;
         }
     } catch (err) { /* silent error */ }
 }
@@ -120,13 +134,11 @@ async function printStatus(forceNotify = false) {
         if (config.dryRun) {
             const s = getSimStats();
             if (s.totalBuys > 0 || s.totalResolved > 0) {
-                const rate = s.totalResolved > 0 ? `${((s.wins / s.totalResolved) * 100).toFixed(0)}% win` : 'no resolved yet';
                 teleMsg += `\n🧪 *SIMULATION STATS*\n`;
                 teleMsg += `Buys: ${s.totalBuys} | Wins: ${s.wins} | PnL: $${(s.closedPnl || 0).toFixed(2)}\n`;
             }
         }
 
-        // Kirim jika ada perubahan posisi ATAU dipaksa perintah /status
         if (positions.length !== lastPosCount || forceNotify) {
             await kirimNotifTelegram(teleMsg);
             lastPosCount = positions.length;
@@ -134,15 +146,6 @@ async function printStatus(forceNotify = false) {
 
     } catch (err) {
         logger.warn(`Status check error: ${err.message}`);
-    }
-}
-
-// ── Redeemer loop ─────────────────────────────────────────────────────────────
-async function redeemerLoop() {
-    try {
-        await checkAndRedeemPositions();
-    } catch (err) {
-        logger.error('Redeemer loop error:', err.message);
     }
 }
 
@@ -167,11 +170,11 @@ async function main() {
     await redeemerLoop();
     setInterval(redeemerLoop, config.redeemInterval);
 
-    // Kirim notif pertama & set interval
+    // Kirim notif pertama
     await printStatus(true);
     setInterval(printStatus, 60_000);
 
-    // AKTIFKAN PENDENGAR TELEGRAM (Cek tiap 5 detik)
+    // Jalankan pendengar Telegram (cek tiap 5 detik)
     setInterval(dengarkanTelegram, 5000);
 
     const shutdown = () => {
@@ -182,6 +185,10 @@ async function main() {
 
     process.on('SIGINT',  shutdown);
     process.on('SIGTERM', shutdown);
+}
+
+async function redeemerLoop() {
+    try { await checkAndRedeemPositions(); } catch (err) { logger.error('Redeemer loop error:', err.message); }
 }
 
 main().catch((err) => {
