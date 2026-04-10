@@ -2,8 +2,8 @@
  * bot.js — PM2 / VPS entry point (no TUI)
  *
  * Plain-text stdout output, compatible with:
- *   pm2 start ecosystem.config.cjs
- *   pm2 logs polymarket-copy
+ * pm2 start ecosystem.config.cjs
+ * pm2 logs polymarket-copy
  */
 import config, { validateConfig } from './config/index.js';
 import { initClient, getUsdcBalance, getClient } from './services/client.js';
@@ -16,6 +16,28 @@ import logger from './utils/logger.js';
 
 logger.interceptConsole(); // strip auth headers from CLOB axios error dumps
 
+// --- TAMBAHAN FUNGSI TELEGRAM PRO ---
+async function kirimNotifTelegram(pesan) {
+    const token = process.env.TELEGRAM_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    if (!token || !chatId) return;
+    
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    try {
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: pesan, parse_mode: 'Markdown' })
+        });
+    } catch (err) {
+        logger.error("Gagal kirim tele: " + err.message);
+    }
+}
+
+// Variabel untuk melacak perubahan posisi
+let lastPosCount = -1;
+// ------------------------------------
+
 // ── Handle a trade event from WebSocket ───────────────────────────────────────
 async function handleTrade(trade) {
     try {
@@ -26,16 +48,24 @@ async function handleTrade(trade) {
     }
 }
 
-// ── Periodic status log (replaces TUI right panel) ────────────────────────────
+// ── Periodic status log & Telegram Notif ──────────────────────────────────────
 async function printStatus() {
     try {
         const balance   = await getUsdcBalance();
         const positions = getOpenPositions();
 
+        // 1. Catat ke terminal (bawaan asli)
         logger.info(`--- Status | Balance: $${balance.toFixed(2)} USDC | Open positions: ${positions.length} ---`);
+
+        // 2. Siapkan kerangka pesan Telegram
+        let teleMsg = `🤖 *Polymarket Status Update*\n\n`;
+        teleMsg += `💵 *Total Balance:* $${balance.toFixed(2)} USDC\n`;
+        teleMsg += `📦 *Open Positions:* ${positions.length}\n\n`;
+        let hasPositions = false;
 
         for (const pos of positions) {
             let pnlStr = '';
+            let telePnlStr = '';
             try {
                 const client = getClient();
                 const mp = await client.getMidpoint(pos.tokenId);
@@ -45,15 +75,27 @@ async function printStatus() {
                     const sign = pnl >= 0 ? '+' : '';
                     const pct  = pos.totalCost > 0 ? ((pnl / pos.totalCost) * 100).toFixed(1) : '0.0';
                     pnlStr = ` | unrealized ${sign}$${pnl.toFixed(2)} (${sign}${pct}%)`;
+                    telePnlStr = `\n   📈 *PnL:* ${sign}$${pnl.toFixed(2)} (${sign}${pct}%)`;
                 }
             } catch { /* price unavailable */ }
 
             const name = (pos.market || pos.tokenId || '').substring(0, 50);
+            
+            // Tulis di Terminal
             logger.info(
                 `  [${pos.outcome || '?'}] ${name}` +
                 ` | ${pos.shares.toFixed(4)} sh @ $${pos.avgBuyPrice.toFixed(4)}` +
                 ` | spent $${(pos.totalCost || 0).toFixed(2)}${pnlStr}`,
             );
+
+            // Tambahkan ke pesan Telegram
+            teleMsg += `🎯 *[${pos.outcome || '?'}]* ${name}\n`;
+            teleMsg += `   📊 ${pos.shares.toFixed(2)} sh @ $${pos.avgBuyPrice.toFixed(4)}${telePnlStr}\n\n`;
+            hasPositions = true;
+        }
+
+        if (!hasPositions) {
+            teleMsg += `_Tidak ada posisi terbuka._\n`;
         }
 
         if (config.dryRun) {
@@ -66,8 +108,20 @@ async function printStatus() {
                     `  [SIM] ${s.totalBuys} buys tracked | ${s.wins}W/${s.losses}L (${rate})` +
                     ` | realized P&L: $${(s.closedPnl || 0).toFixed(2)}`,
                 );
+                
+                // Tambahkan stat simulasi ke Telegram
+                teleMsg += `\n🧪 *SIMULATION STATS*\n`;
+                teleMsg += `Buys: ${s.totalBuys} | Wins: ${s.wins} | PnL: $${(s.closedPnl || 0).toFixed(2)}\n`;
             }
         }
+
+        // --- 3. LOGIKA PENGIRIMAN TELEGRAM ---
+        // Kirim ke Telegram HANYA saat baru jalan atau ada perubahan jumlah open posisi
+        if (positions.length !== lastPosCount) {
+            await kirimNotifTelegram(teleMsg);
+            lastPosCount = positions.length; // Perbarui tracker
+        }
+
     } catch (err) {
         logger.warn(`Status check error: ${err.message}`);
     }
