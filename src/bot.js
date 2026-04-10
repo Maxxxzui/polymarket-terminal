@@ -16,7 +16,10 @@ import logger from './utils/logger.js';
 
 logger.interceptConsole(); // strip auth headers from CLOB axios error dumps
 
-// --- TAMBAHAN FUNGSI TELEGRAM PRO ---
+// --- TAMBAHAN FUNGSI TELEGRAM INTERACTIVE ---
+let lastUpdateId = 0;
+let lastPosCount = -1;
+
 async function kirimNotifTelegram(pesan) {
     const token = process.env.TELEGRAM_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -34,9 +37,36 @@ async function kirimNotifTelegram(pesan) {
     }
 }
 
-// Variabel untuk melacak perubahan posisi
-let lastPosCount = -1;
-// ------------------------------------
+async function dengarkanTelegram() {
+    const token = process.env.TELEGRAM_TOKEN;
+    if (!token) return;
+
+    try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId + 1}&timeout=5`);
+        const data = await res.json();
+        
+        if (data.result && data.result.length > 0) {
+            for (const update of data.result) {
+                lastUpdateId = update.update_id;
+                const msg = update.message?.text;
+                
+                if (msg === '/status') {
+                    logger.info("📩 Perintah Telegram: /status");
+                    await printStatus(true); // Paksa kirim notif
+                } 
+                else if (msg === '/stop') {
+                    logger.info("📩 Perintah Telegram: /stop");
+                    await kirimNotifTelegram("🛑 *Bot dihentikan via Telegram!*");
+                    process.emit('SIGINT');
+                }
+                else if (msg === '/start') {
+                    await kirimNotifTelegram("🤖 *Bot Polymarket aktif!* \nKetik /status untuk cek saldo & posisi.");
+                }
+            }
+        }
+    } catch (err) { /* silent error */ }
+}
+// --------------------------------------------
 
 // ── Handle a trade event from WebSocket ───────────────────────────────────────
 async function handleTrade(trade) {
@@ -49,15 +79,13 @@ async function handleTrade(trade) {
 }
 
 // ── Periodic status log & Telegram Notif ──────────────────────────────────────
-async function printStatus() {
+async function printStatus(forceNotify = false) {
     try {
         const balance   = await getUsdcBalance();
         const positions = getOpenPositions();
 
-        // 1. Catat ke terminal (bawaan asli)
         logger.info(`--- Status | Balance: $${balance.toFixed(2)} USDC | Open positions: ${positions.length} ---`);
 
-        // 2. Siapkan kerangka pesan Telegram
         let teleMsg = `🤖 *Polymarket Status Update*\n\n`;
         teleMsg += `💵 *Total Balance:* $${balance.toFixed(2)} USDC\n`;
         teleMsg += `📦 *Open Positions:* ${positions.length}\n\n`;
@@ -80,46 +108,28 @@ async function printStatus() {
             } catch { /* price unavailable */ }
 
             const name = (pos.market || pos.tokenId || '').substring(0, 50);
-            
-            // Tulis di Terminal
-            logger.info(
-                `  [${pos.outcome || '?'}] ${name}` +
-                ` | ${pos.shares.toFixed(4)} sh @ $${pos.avgBuyPrice.toFixed(4)}` +
-                ` | spent $${(pos.totalCost || 0).toFixed(2)}${pnlStr}`,
-            );
+            logger.info(`  [${pos.outcome || '?'}] ${name} | ${pos.shares.toFixed(4)} sh @ $${pos.avgBuyPrice.toFixed(4)} | spent $${(pos.totalCost || 0).toFixed(2)}${pnlStr}`);
 
-            // Tambahkan ke pesan Telegram
             teleMsg += `🎯 *[${pos.outcome || '?'}]* ${name}\n`;
             teleMsg += `   📊 ${pos.shares.toFixed(2)} sh @ $${pos.avgBuyPrice.toFixed(4)}${telePnlStr}\n\n`;
             hasPositions = true;
         }
 
-        if (!hasPositions) {
-            teleMsg += `_Tidak ada posisi terbuka._\n`;
-        }
+        if (!hasPositions) teleMsg += `_Tidak ada posisi terbuka._\n`;
 
         if (config.dryRun) {
             const s = getSimStats();
             if (s.totalBuys > 0 || s.totalResolved > 0) {
-                const rate = s.totalResolved > 0
-                    ? `${((s.wins / s.totalResolved) * 100).toFixed(0)}% win`
-                    : 'no resolved yet';
-                logger.info(
-                    `  [SIM] ${s.totalBuys} buys tracked | ${s.wins}W/${s.losses}L (${rate})` +
-                    ` | realized P&L: $${(s.closedPnl || 0).toFixed(2)}`,
-                );
-                
-                // Tambahkan stat simulasi ke Telegram
+                const rate = s.totalResolved > 0 ? `${((s.wins / s.totalResolved) * 100).toFixed(0)}% win` : 'no resolved yet';
                 teleMsg += `\n🧪 *SIMULATION STATS*\n`;
                 teleMsg += `Buys: ${s.totalBuys} | Wins: ${s.wins} | PnL: $${(s.closedPnl || 0).toFixed(2)}\n`;
             }
         }
 
-        // --- 3. LOGIKA PENGIRIMAN TELEGRAM ---
-        // Kirim ke Telegram HANYA saat baru jalan atau ada perubahan jumlah open posisi
-        if (positions.length !== lastPosCount) {
+        // Kirim jika ada perubahan posisi ATAU dipaksa perintah /status
+        if (positions.length !== lastPosCount || forceNotify) {
             await kirimNotifTelegram(teleMsg);
-            lastPosCount = positions.length; // Perbarui tracker
+            lastPosCount = positions.length;
         }
 
     } catch (err) {
@@ -147,49 +157,26 @@ async function main() {
 
     const mode = config.dryRun ? 'SIMULATION' : 'LIVE TRADING';
     logger.info(`=== Polymarket Copy Trade [${mode}] ===`);
-    logger.info(`Trader       : ${config.traderAddress}`);
-    logger.info(`Proxy wallet : ${config.proxyWallet}`);
-    logger.info(`Size mode    : ${config.sizeMode} (${config.sizePercent}%)`);
-    logger.info(`Min trade    : $${config.minTradeSize}`);
-    logger.info(`Max position : $${config.maxPositionSize} per market`);
-    logger.info(`Auto sell    : ${config.autoSellEnabled ? `ON (+${config.autoSellProfitPercent}%)` : 'OFF'}`);
-    logger.info(`Sell mode    : ${config.sellMode}`);
-    logger.info(`Min time left: ${config.minMarketTimeLeft}s`);
-    logger.info('==========================================');
-
-    try {
-        await initClient();
-    } catch (err) {
+    
+    try { await initClient(); } catch (err) {
         logger.error('Failed to initialize CLOB client:', err.message);
         process.exit(1);
     }
 
-    try {
-        const balance = await getUsdcBalance();
-        logger.money(`USDC.e Balance: $${balance.toFixed(2)}`);
-    } catch (err) {
-        logger.warn('Could not fetch balance:', err.message);
-    }
-
-    logger.success(
-        config.dryRun
-            ? 'Simulation started — watching trader in real-time...'
-            : 'Bot started — watching trader in real-time...',
-    );
-
     startWsWatcher(handleTrade);
-
     await redeemerLoop();
-    const redeemerInterval = setInterval(redeemerLoop, config.redeemInterval);
+    setInterval(redeemerLoop, config.redeemInterval);
 
-    // Print status every 60 seconds
-    const statusInterval = setInterval(printStatus, 60_000);
+    // Kirim notif pertama & set interval
+    await printStatus(true);
+    setInterval(printStatus, 60_000);
+
+    // AKTIFKAN PENDENGAR TELEGRAM (Cek tiap 5 detik)
+    setInterval(dengarkanTelegram, 5000);
 
     const shutdown = () => {
         logger.info('Shutting down...');
         stopWsWatcher();
-        clearInterval(redeemerInterval);
-        clearInterval(statusInterval);
         setTimeout(() => process.exit(0), 300);
     };
 
